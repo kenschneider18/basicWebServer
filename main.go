@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"strconv"
+	"bytes"
+	"io"
 )
 
 const (
@@ -87,7 +89,8 @@ func query(city string) (weatherData, error) {
 
 type openWeatherMap struct{}
 
-func (w openWeatherMap) tempAndHumidity(city string) (temp float64, humidity int, err error) {
+func (sw openWeatherMap) tempAndHumidity(city string) (temp float64, humidity int, err error) {
+	fmt.Println("Open Weather map API call started...")
 	resp, err := http.Get("http://api.openweathermap.org/data/2.5/weather?APPID=" + OpenApiKey + "&q=" + city)
 	if err != nil {
 		return 0, 0, err
@@ -96,8 +99,13 @@ func (w openWeatherMap) tempAndHumidity(city string) (temp float64, humidity int
 	// Defer functions are dope
 	defer resp.Body.Close()
 
+	body, err := log("OpenWeatherMap", resp.StatusCode, resp.Body)
+	if err != nil {
+		panic(fmt.Errorf("Could not log OpenWeatherMap response: %s", err))
+	}
+
 	var d weatherData
-	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+	if err := json.NewDecoder(body).Decode(&d); err != nil {
 		return 0, 0, err
 	}
 
@@ -109,12 +117,18 @@ type weatherUnderground struct{
 }
 
 func (w weatherUnderground) tempAndHumidity(city string) (temp float64, humidity int, err error) {
+	fmt.Println("Weather Underground API call started...")
 	resp, err := http.Get("http://api.wunderground.com/api/" + w.apiKey + "/conditions/q/" + city + ".json")
 	if err != nil {
 		return 0,0, err
 	}
 
 	defer resp.Body.Close()
+
+	body, err := log("WeatherUnderground", resp.StatusCode, resp.Body)
+	if err != nil {
+		panic(fmt.Errorf("Could not log response from WeatherUnderground: %s", err))
+	}
 
 	var d struct {
 		Observation struct {
@@ -125,7 +139,7 @@ func (w weatherUnderground) tempAndHumidity(city string) (temp float64, humidity
 
 	// This gets executed on a io.Reader and reads that info into the provided stuct
 	// so long as we have the correct tags on it
-	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+	if err := json.NewDecoder(body).Decode(&d); err != nil {
 		return 0, 0, err
 	}
 
@@ -168,7 +182,7 @@ func (mw multiWeatherProvider) tempAndHumidity(city string) (temp float64, humid
 		totalHumidity += h*/
 
 		go func (p weatherProvider) {
-			k, h, err := provider.tempAndHumidity(city)
+			k, h, err := p.tempAndHumidity(city)
 			if err != nil {
 				errors <- err
 			}
@@ -186,7 +200,27 @@ func (mw multiWeatherProvider) tempAndHumidity(city string) (temp float64, humid
 		}
 	}
 
-	return totalTemp / float64(len(mw)), totalHumidity / len(mw), nil
+	avgKelvin := totalTemp / float64(len(mw))
+	fmt.Printf("Avg Kelvin: %f\n", avgKelvin)
+
+	return avgKelvin * 1.8 - 459.67, totalHumidity / len(mw), nil
+}
+
+func log(name string, statusCode int, body io.ReadCloser) (io.Reader, error) {
+	var buf bytes.Buffer
+	tee := io.TeeReader(body, &buf)
+
+	var printBuf bytes.Buffer
+	_, err := printBuf.ReadFrom(tee)
+	if err != nil {
+		//panic(fmt.Errorf("Could not read from TeeReader: %s", err))
+		return nil, err
+	}
+	bodyString := printBuf.String()
+
+	fmt.Printf("Received %d response from %s:\n%s\n", statusCode, name, bodyString)
+
+	return bytes.NewReader(buf.Bytes()), nil
 }
 
 func hello(w http.ResponseWriter, r *http.Request) {
